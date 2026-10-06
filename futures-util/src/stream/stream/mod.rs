@@ -144,7 +144,7 @@ mod try_fold;
 pub use self::try_fold::TryFold;
 
 mod zip;
-pub use self::zip::Zip;
+pub use self::zip::{Zip, ZipRemainder, ZipSideState};
 
 #[cfg(feature = "alloc")]
 mod chunks;
@@ -1550,6 +1550,13 @@ pub trait StreamExt: Stream {
     /// The zipped stream waits for both streams to produce an item, and then
     /// returns that pair. If either stream ends then the zipped stream will
     /// also end.
+    ///
+    /// Note that when the shorter stream ends, the longer stream may already
+    /// have produced an item that was prefetched but never paired. By default
+    /// that item is dropped when the zipped stream is dropped; call
+    /// [`Zip::into_remainder`] to receive an explicit receipt with the
+    /// leftover item, the per-side EOF/pending state, and the remaining
+    /// stream handles instead.
     ///
     /// # Examples
     ///
