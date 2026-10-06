@@ -144,7 +144,7 @@ mod try_fold;
 pub use self::try_fold::TryFold;
 
 mod zip;
-pub use self::zip::Zip;
+pub use self::zip::{Zip, ZipRemainder, ZipSide};
 
 #[cfg(feature = "alloc")]
 mod chunks;
@@ -1550,6 +1550,11 @@ pub trait StreamExt: Stream {
     /// The zipped stream waits for both streams to produce an item, and then
     /// returns that pair. If either stream ends then the zipped stream will
     /// also end.
+    ///
+    /// When one stream ends, the other stream may already have been polled
+    /// one extra time. Use [`Zip::into_remainder`] to recover that buffered
+    /// item and the remaining stream handles via an explicit EOF receipt
+    /// instead of silently dropping them.
     ///
     /// # Examples
     ///

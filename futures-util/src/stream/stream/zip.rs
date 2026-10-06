@@ -1,4 +1,4 @@
-use core::{cmp, pin::Pin};
+use core::{cmp, fmt, pin::Pin};
 
 use futures_core::{
     stream::{FusedStream, Stream},
@@ -56,8 +56,200 @@ impl<St1: Stream, St2: Stream> Zip<St1, St2> {
     ///
     /// Note that this may discard intermediate state of this combinator, so
     /// care should be taken to avoid losing resources when this is called.
+    /// In particular, an item that was already polled from one stream but
+    /// not yet paired with an item from the other stream is silently
+    /// discarded. Use [`into_remainder`](Self::into_remainder) if that
+    /// buffered item and the exact end-of-stream state of each side matter.
     pub fn into_inner(self) -> (St1, St2) {
         (self.stream1.into_inner(), self.stream2.into_inner())
+    }
+
+    /// Takes this combinator apart, returning an explicit EOF receipt that
+    /// describes the end-of-stream state of both sides.
+    ///
+    /// When the shorter stream ends, the zipped stream ends as well (this
+    /// default behavior is unchanged), but the longer stream may already
+    /// have been polled one extra time, producing an item that was never
+    /// paired. Instead of silently dropping that item, this receipt gives
+    /// it back together with the remaining stream handle, so ownership of
+    /// the prefetched item is unambiguous.
+    ///
+    /// For each side the receipt reports whether the stream is still
+    /// [`Open`](ZipSide::Open) (it never returned `None` and may yield more
+    /// items, possibly starting with a `buffered` one) or already reached
+    /// [`Eof`](ZipSide::Eof). A side that merely returned `Poll::Pending`
+    /// is reported as `Open` with no buffered item; it is never mistaken
+    /// for EOF. When zipping streams of `Result` items, a buffered `Err`
+    /// stays attributed to the side it was polled from.
+    ///
+    /// This function never polls either stream: taking the receipt (or
+    /// dropping the combinator) cancels the zip without polling a stream
+    /// that has already completed again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::stream::{self, StreamExt, ZipSide};
+    ///
+    /// let stream1 = stream::iter(1..=2); // left: two items
+    /// let stream2 = stream::iter(5..=8); // right: four items
+    ///
+    /// let mut zipped = stream1.zip(stream2);
+    /// assert_eq!(zipped.next().await, Some((1, 5)));
+    /// assert_eq!(zipped.next().await, Some((2, 6)));
+    /// // The left stream is exhausted, so the zipped stream ends...
+    /// assert_eq!(zipped.next().await, None);
+    ///
+    /// // ...but the right stream had already been polled once more, and
+    /// // the receipt hands the prefetched item back instead of dropping it.
+    /// let receipt = zipped.into_remainder();
+    /// assert!(receipt.left.is_eof());
+    /// match receipt.right {
+    ///     ZipSide::Open { stream, buffered } => {
+    ///         assert_eq!(buffered, Some(7));
+    ///         assert_eq!(stream.collect::<Vec<_>>().await, vec![8]);
+    ///     }
+    ///     ZipSide::Eof => unreachable!(),
+    /// }
+    /// # });
+    /// ```
+    pub fn into_remainder(self) -> ZipRemainder<St1, St2> {
+        let Self { stream1, stream2, queued1, queued2 } = self;
+        let left = if stream1.is_done() {
+            // A fused stream that reported EOF was only ever polled while
+            // its queue was empty, so there cannot be a leftover item.
+            debug_assert!(queued1.is_none());
+            ZipSide::Eof
+        } else {
+            ZipSide::Open { stream: stream1.into_inner(), buffered: queued1 }
+        };
+        let right = if stream2.is_done() {
+            debug_assert!(queued2.is_none());
+            ZipSide::Eof
+        } else {
+            ZipSide::Open { stream: stream2.into_inner(), buffered: queued2 }
+        };
+        ZipRemainder { left, right }
+    }
+}
+
+/// Explicit EOF policy receipt returned by [`Zip::into_remainder`].
+///
+/// It records, for each side of the zip, whether the stream is still open
+/// (together with any item that was prefetched but never paired) or has
+/// already reported EOF, so that nothing is silently dropped while the
+/// caller might assume every polled item was paired.
+#[must_use = "the receipt owns the remaining stream handles and buffered items"]
+pub struct ZipRemainder<St1: Stream, St2: Stream> {
+    /// State of the first (left) stream passed to
+    /// [`zip`](super::StreamExt::zip).
+    pub left: ZipSide<St1>,
+    /// State of the second (right) stream passed to
+    /// [`zip`](super::StreamExt::zip).
+    pub right: ZipSide<St2>,
+}
+
+impl<St1, St2> fmt::Debug for ZipRemainder<St1, St2>
+where
+    St1: Stream + fmt::Debug,
+    St1::Item: fmt::Debug,
+    St2: Stream + fmt::Debug,
+    St2::Item: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZipRemainder")
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .finish()
+    }
+}
+
+impl<St1: Stream, St2: Stream> ZipRemainder<St1, St2> {
+    /// Returns `true` if both sides already reported EOF, i.e. the two
+    /// streams ended in lockstep and nothing remains to be recovered.
+    pub fn both_eof(&self) -> bool {
+        self.left.is_eof() && self.right.is_eof()
+    }
+
+    /// Consumes the receipt, returning the state of both sides.
+    pub fn into_sides(self) -> (ZipSide<St1>, ZipSide<St2>) {
+        (self.left, self.right)
+    }
+}
+
+/// The state of one side of a [`Zip`] combinator, as reported by
+/// [`Zip::into_remainder`].
+pub enum ZipSide<St: Stream> {
+    /// The stream has not returned `None` yet. It may have returned
+    /// `Poll::Pending` any number of times, but pending is never reported
+    /// as EOF: the stream is handed back and may still be polled for more
+    /// items.
+    Open {
+        /// The remaining stream handle. It has never been polled again
+        /// after reporting `None`, so polling it is safe.
+        stream: St,
+        /// An item that was already polled from `stream` but never paired
+        /// with an item from the other side. If the zipped items are
+        /// `Result`s, a buffered `Err` stays on this side.
+        buffered: Option<St::Item>,
+    },
+    /// The stream already returned `None` (EOF). It is consumed by the zip
+    /// and will never be polled again; no buffered item remains on this
+    /// side.
+    Eof,
+}
+
+impl<St> fmt::Debug for ZipSide<St>
+where
+    St: Stream + fmt::Debug,
+    St::Item: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZipSide::Open { stream, buffered } => {
+                f.debug_struct("Open").field("stream", stream).field("buffered", buffered).finish()
+            }
+            ZipSide::Eof => f.write_str("Eof"),
+        }
+    }
+}
+
+impl<St: Stream> ZipSide<St> {
+    /// Returns `true` if this side already reported EOF.
+    pub fn is_eof(&self) -> bool {
+        matches!(self, ZipSide::Eof)
+    }
+
+    /// Returns `true` if this side is still open and may yield more items.
+    pub fn is_open(&self) -> bool {
+        matches!(self, ZipSide::Open { .. })
+    }
+
+    /// Returns a reference to the buffered, not-yet-paired item, if any.
+    pub fn buffered(&self) -> Option<&St::Item> {
+        match self {
+            ZipSide::Open { buffered, .. } => buffered.as_ref(),
+            ZipSide::Eof => None,
+        }
+    }
+
+    /// Takes the buffered, not-yet-paired item out of this side, if any.
+    pub fn take_buffered(&mut self) -> Option<St::Item> {
+        match self {
+            ZipSide::Open { buffered, .. } => buffered.take(),
+            ZipSide::Eof => None,
+        }
+    }
+
+    /// Consumes this side, returning the remaining stream handle (`None`
+    /// if the side already reported EOF) and the buffered, not-yet-paired
+    /// item, if any.
+    pub fn into_parts(self) -> (Option<St>, Option<St::Item>) {
+        match self {
+            ZipSide::Open { stream, buffered } => (Some(stream), buffered),
+            ZipSide::Eof => (None, None),
+        }
     }
 }
 
