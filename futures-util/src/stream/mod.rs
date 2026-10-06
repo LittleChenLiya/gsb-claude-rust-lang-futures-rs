@@ -35,8 +35,8 @@ pub use self::stream::{
 #[cfg(target_has_atomic = "ptr")]
 #[cfg(feature = "alloc")]
 pub use self::stream::{
-    BufferUnordered, Buffered, FlatMapUnordered, FlattenUnordered, ForEachConcurrent,
-    TryForEachConcurrent,
+    BufferOrdered, BufferUnordered, Buffered, FlatMapUnordered, FlattenUnordered,
+    ForEachConcurrent, IndexedError, TryForEachConcurrent,
 };
 #[cfg(target_has_atomic = "ptr")]
 #[cfg(feature = "sink")]

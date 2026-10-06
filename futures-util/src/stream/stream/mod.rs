@@ -161,6 +161,13 @@ pub use self::scan::Scan;
 
 #[cfg(target_has_atomic = "ptr")]
 #[cfg(feature = "alloc")]
+mod buffer_ordered;
+#[cfg(target_has_atomic = "ptr")]
+#[cfg(feature = "alloc")]
+pub use self::buffer_ordered::{BufferOrdered, IndexedError};
+
+#[cfg(target_has_atomic = "ptr")]
+#[cfg(feature = "alloc")]
 mod buffer_unordered;
 #[cfg(target_has_atomic = "ptr")]
 #[cfg(feature = "alloc")]
@@ -1494,6 +1501,94 @@ pub trait StreamExt: Stream {
         Self: Sized,
     {
         assert_stream::<<Self::Item as Future>::Output, _>(Buffered::new(self, n.into()))
+    }
+
+    /// An adaptor for creating a bounded, ordered buffer of pending futures
+    /// whose errors keep their input index.
+    ///
+    /// If this stream's item can be converted into a future, then this adaptor
+    /// will buffer up to at most `n` futures and then return the outputs in
+    /// the same order as the underlying stream, regardless of the order in
+    /// which the futures complete. No more than `n` futures will be polled
+    /// (in flight) at any point in time, and less than `n` may also be
+    /// buffered depending on the state of each future.
+    ///
+    /// Each item of the returned stream is a `Result`: successful outputs are
+    /// passed through unchanged (in input order), while errors are wrapped in
+    /// [`IndexedError`], which records the zero-based index of the input
+    /// future that failed.
+    ///
+    /// The limit argument is of type `Into<Option<usize>>`, and so can be
+    /// provided as either `None`, `Some(10)`, or just `10`. Note: a limit of zero is
+    /// interpreted as no limit at all, and will have the same result as passing in `None`.
+    ///
+    /// Dropping the returned stream only drops the futures it has already
+    /// taken ownership of (the ones currently buffered plus the ones still
+    /// owned by the underlying stream); it does not touch any future it does
+    /// not hold.
+    ///
+    /// Unlike [`buffer_unordered`](StreamExt::buffer_unordered), results are
+    /// always yielded in the original input order.
+    ///
+    /// This method is only available when the `std` or `alloc` feature of this
+    /// library is activated, and it is activated by default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::channel::oneshot;
+    /// use futures::stream::{self, StreamExt};
+    ///
+    /// let (send_one, recv_one) = oneshot::channel();
+    /// let (send_two, recv_two) = oneshot::channel();
+    ///
+    /// let stream_of_futures = stream::iter(vec![recv_one, recv_two]);
+    /// let mut buffered = stream_of_futures.buffer_ordered(10);
+    ///
+    /// // Even though the second future resolves first, results come out in
+    /// // the original input order.
+    /// send_two.send(2i32)?;
+    /// send_one.send(1i32)?;
+    /// assert_eq!(buffered.next().await, Some(Ok(1i32)));
+    /// assert_eq!(buffered.next().await, Some(Ok(2i32)));
+    /// assert_eq!(buffered.next().await, None);
+    /// # Ok::<(), i32>(()) }).unwrap();
+    /// ```
+    ///
+    /// Errors are tagged with the index of the input future that failed:
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::future;
+    /// use futures::stream::{self, StreamExt};
+    ///
+    /// let stream_of_futures = stream::iter(vec![
+    ///     future::ready(Ok::<_, &'static str>(0)),
+    ///     future::ready(Err("boom")),
+    ///     future::ready(Ok::<_, &'static str>(2)),
+    /// ]);
+    /// let mut buffered = stream_of_futures.buffer_ordered(2);
+    ///
+    /// assert_eq!(buffered.next().await, Some(Ok(0)));
+    /// let err = buffered.next().await.unwrap().unwrap_err();
+    /// assert_eq!(err.index, 1);
+    /// assert_eq!(err.error, "boom");
+    /// assert_eq!(buffered.next().await, Some(Ok(2)));
+    /// assert_eq!(buffered.next().await, None);
+    /// # });
+    /// ```
+    #[cfg(target_has_atomic = "ptr")]
+    #[cfg(feature = "alloc")]
+    fn buffer_ordered<T, E>(
+        self,
+        n: impl Into<Option<usize>>,
+    ) -> BufferOrdered<Self>
+    where
+        Self::Item: Future<Output = Result<T, E>>,
+        Self: Sized,
+    {
+        assert_stream::<Result<T, IndexedError<E>>, _>(BufferOrdered::new(self, n.into()))
     }
 
     /// An adaptor for creating a buffered list of pending futures (unordered).
