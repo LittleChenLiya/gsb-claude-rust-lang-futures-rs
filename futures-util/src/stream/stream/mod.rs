@@ -175,6 +175,13 @@ pub use self::buffered::Buffered;
 
 #[cfg(target_has_atomic = "ptr")]
 #[cfg(feature = "alloc")]
+mod buffered_ordered;
+#[cfg(target_has_atomic = "ptr")]
+#[cfg(feature = "alloc")]
+pub use self::buffered_ordered::{BufferedOrdered, IndexedError};
+
+#[cfg(target_has_atomic = "ptr")]
+#[cfg(feature = "alloc")]
 pub(crate) mod flatten_unordered;
 
 #[cfg(target_has_atomic = "ptr")]
@@ -1494,6 +1501,57 @@ pub trait StreamExt: Stream {
         Self: Sized,
     {
         assert_stream::<<Self::Item as Future>::Output, _>(Buffered::new(self, n.into()))
+    }
+
+    /// An adaptor for creating a bounded, ordered buffer of pending futures.
+    ///
+    /// If this stream's item can be converted into a future, then this adaptor
+    /// will poll at most `n` futures at any point in time and yield their
+    /// outputs in the same order as the underlying stream, regardless of the
+    /// order in which the futures complete.
+    ///
+    /// The futures must return a [`Result`]. If a future fails, the error is
+    /// yielded as an [`IndexedError`] that preserves the index of that future
+    /// in the input stream; the remaining futures keep being admitted and
+    /// polled (the stream does not stop on the first error).
+    ///
+    /// Dropping the returned stream only releases the futures it currently
+    /// holds (the ones still in flight and the ones not yet pulled from the
+    /// underlying stream); it does not affect anything else.
+    ///
+    /// This method is only available when the `std` or `alloc` feature of this
+    /// library is activated, and it is activated by default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::future;
+    /// use futures::stream::{self, StreamExt};
+    ///
+    /// let stream_of_futures = stream::iter(vec![
+    ///     future::ready(Ok::<_, &str>(1)),
+    ///     future::ready(Err("boom")),
+    ///     future::ready(Ok::<_, &str>(3)),
+    /// ]);
+    /// let mut buffered = stream_of_futures.buffered_ordered(2);
+    ///
+    /// assert_eq!(buffered.next().await, Some(Ok(1)));
+    /// let err = buffered.next().await.unwrap().unwrap_err();
+    /// assert_eq!(err.index, 1);
+    /// assert_eq!(err.error, "boom");
+    /// assert_eq!(buffered.next().await, Some(Ok(3)));
+    /// assert_eq!(buffered.next().await, None);
+    /// # });
+    /// ```
+    #[cfg(target_has_atomic = "ptr")]
+    #[cfg(feature = "alloc")]
+    fn buffered_ordered(self, n: usize) -> BufferedOrdered<Self>
+    where
+        Self::Item: Future,
+        Self: Sized,
+    {
+        BufferedOrdered::new(self, n)
     }
 
     /// An adaptor for creating a buffered list of pending futures (unordered).
