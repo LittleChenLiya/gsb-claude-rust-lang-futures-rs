@@ -181,3 +181,117 @@ fn try_any() {
         assert_eq!(Err("err"), any);
     });
 }
+
+/// Hand-written in-memory stream fixture: replays a fixed script of items and
+/// then terminates (fused), so tests can observe post-error and
+/// post-termination states deterministically.
+struct ManualStream {
+    items: std::vec::IntoIter<Result<i32, &'static str>>,
+}
+
+impl ManualStream {
+    fn new(items: Vec<Result<i32, &'static str>>) -> Self {
+        Self { items: items.into_iter() }
+    }
+}
+
+impl Stream for ManualStream {
+    type Item = Result<i32, &'static str>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.items.next())
+    }
+}
+
+impl futures::stream::FusedStream for ManualStream {
+    fn is_terminated(&self) -> bool {
+        self.items.len() == 0
+    }
+}
+
+#[test]
+fn map_err_with_count_two_oks_then_err() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let cx = &mut noop_context();
+    // Mapper calls are recorded as (ok_count, error) pairs.
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let calls2 = Rc::clone(&calls);
+
+    let mut s = ManualStream::new(vec![Ok(1), Ok(2), Err("boom")])
+        .map_err_with_count(move |n, e| {
+            calls2.borrow_mut().push((n, e));
+            format!("mapped#{n}:{e}")
+        });
+
+    assert_eq!(Poll::Ready(Some(Ok(1))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Ok(2))), s.poll_next_unpin(cx));
+    // The error is mapped exactly once, seeing the two successful items.
+    assert_eq!(Poll::Ready(Some(Err("mapped#2:boom".to_string()))), s.poll_next_unpin(cx));
+    assert_eq!(*calls.borrow(), vec![(2, "boom")]);
+    // Input stream terminated: the adapter follows it and stays terminated.
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+    assert_eq!(calls.borrow().len(), 1);
+}
+
+#[test]
+fn map_err_with_count_continues_after_error() {
+    use futures::stream::FusedStream;
+
+    let cx = &mut noop_context();
+    let mut s = ManualStream::new(vec![Ok(1), Err("a"), Ok(2), Err("b"), Ok(3)])
+        .map_err_with_count(|n, e| (n, e));
+
+    assert!(!s.is_terminated());
+    assert_eq!(Poll::Ready(Some(Ok(1))), s.poll_next_unpin(cx));
+    // Error does not terminate the adapter; the count keeps the oks so far.
+    assert_eq!(Poll::Ready(Some(Err((1, "a")))), s.poll_next_unpin(cx));
+    assert!(!s.is_terminated());
+    assert_eq!(Poll::Ready(Some(Ok(2))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Err((2, "b")))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Ok(3))), s.poll_next_unpin(cx));
+    // Only once the input stream is exhausted does the adapter terminate.
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+    assert!(s.is_terminated());
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+}
+
+#[test]
+fn map_err_with_count_matches_map_err_regression() {
+    // Short regression check against the original `map_err` interface: both
+    // adapters must produce identical output for the same input.
+    let input = || vec![Ok(10), Ok(20), Err("x"), Ok(30), Err("y")];
+
+    let via_map_err = block_on(
+        ManualStream::new(input()).map_err(|e| format!("E:{e}")).collect::<Vec<_>>(),
+    );
+    let via_count = block_on(
+        ManualStream::new(input())
+            .map_err_with_count(|_n, e| format!("E:{e}"))
+            .collect::<Vec<_>>(),
+    );
+
+    let expected = vec![
+        Ok(10),
+        Ok(20),
+        Err("E:x".to_string()),
+        Ok(30),
+        Err("E:y".to_string()),
+    ];
+    assert_eq!(via_map_err, expected);
+    assert_eq!(via_count, expected);
+    println!("map_err           => {via_map_err:?}");
+    println!("map_err_with_count=> {via_count:?}");
+}
+
+#[test]
+fn map_err_with_count_auto_traits() {
+    fn assert_send<T: Send>(_: &T) {}
+    fn assert_unpin<T: Unpin>(_: &T) {}
+
+    let s = stream::iter(vec![Ok::<i32, i32>(1)]).map_err_with_count(|_n, e| e);
+    assert_send(&s);
+    assert_unpin(&s);
+}

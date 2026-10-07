@@ -65,6 +65,9 @@ delegate_all!(
     ): Debug + Sink + Stream + FusedStream + AccessInner[St, (. .)] + New[|x: St, f: F| Map::new(IntoStream::new(x), map_err_fn(f))]
 );
 
+mod map_err_with_count;
+pub use self::map_err_with_count::MapErrWithCount;
+
 mod or_else;
 pub use self::or_else::OrElse;
 
@@ -230,6 +233,39 @@ pub trait TryStreamExt: TryStream {
         F: FnMut(Self::Error) -> E,
     {
         assert_stream::<Result<Self::Ok, E>, _>(MapErr::new(self, f))
+    }
+
+    /// Wraps the current stream in a new stream which maps the error value
+    /// using the provided closure, additionally passing the number of
+    /// successful items yielded so far.
+    ///
+    /// The closure is called exactly once for each incoming error, at the
+    /// point where the error arrives, and its return value replaces that
+    /// error. It can neither swallow the error nor inject extra items:
+    /// whether the stream continues or terminates after an error is entirely
+    /// determined by the underlying stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::stream::{self, TryStreamExt};
+    ///
+    /// let mut stream =
+    ///     stream::iter(vec![Ok(5), Ok(6), Err(0)])
+    ///         .map_err_with_count(|n, e| (n, e));
+    ///
+    /// assert_eq!(stream.try_next().await, Ok(Some(5)));
+    /// assert_eq!(stream.try_next().await, Ok(Some(6)));
+    /// assert_eq!(stream.try_next().await, Err((2, 0)));
+    /// # })
+    /// ```
+    fn map_err_with_count<E, F>(self, f: F) -> MapErrWithCount<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(u64, Self::Error) -> E,
+    {
+        assert_stream::<Result<Self::Ok, E>, _>(MapErrWithCount::new(self, f))
     }
 
     /// Chain on a computation for when a value is ready, passing the successful
