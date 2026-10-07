@@ -7,7 +7,7 @@ use futures_core::{
 use pin_project_lite::pin_project;
 
 use super::assert_stream;
-use crate::stream::{PollNext, SelectWithStrategy, select_with_strategy};
+use crate::stream::{PollNext, SelectState, SelectWithStrategy, select_with_strategy};
 
 pin_project! {
     /// Stream for the [`select()`] function.
@@ -94,6 +94,27 @@ impl<St1, St2> Select<St1, St2> {
     /// care should be taken to avoid losing resources when this is called.
     pub fn into_inner(self) -> (St1, St2) {
         self.inner.into_inner()
+    }
+
+    /// Returns a snapshot of which sides of this combinator have terminated.
+    ///
+    /// A terminated side is never polled again; the other side keeps being
+    /// polled (and may keep yielding items) until it terminates as well.
+    /// Once both sides have terminated, polling stably returns `None`.
+    pub fn state(&self) -> SelectState {
+        self.inner.state()
+    }
+
+    /// Returns `true` if the left (first) stream has terminated and will not
+    /// be polled again.
+    pub fn is_left_terminated(&self) -> bool {
+        self.inner.is_left_terminated()
+    }
+
+    /// Returns `true` if the right (second) stream has terminated and will
+    /// not be polled again.
+    pub fn is_right_terminated(&self) -> bool {
+        self.inner.is_right_terminated()
     }
 }
 

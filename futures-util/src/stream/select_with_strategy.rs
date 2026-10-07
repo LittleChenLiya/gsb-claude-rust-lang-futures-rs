@@ -35,11 +35,63 @@ impl PollNext {
     }
 }
 
+/// Snapshot of which sides of a two-way select stream
+/// ([`SelectWithStrategy`] / [`Select`](crate::stream::Select)) have terminated.
+///
+/// Once a side has terminated it is never polled again ("termination
+/// masking"); the remaining side keeps being polled according to the same
+/// selection strategy, which simply has only one choice left. When both
+/// sides have terminated, polling stably returns `None` without touching
+/// either underlying stream.
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone, Hash)]
+pub enum SelectState {
+    /// Both sides are still live and may yield more items.
+    #[default]
+    Running,
+    /// The left (first) stream has terminated; only the right stream is
+    /// polled from now on.
+    LeftFinished,
+    /// The right (second) stream has terminated; only the left stream is
+    /// polled from now on.
+    RightFinished,
+    /// Both streams have terminated; polling yields `None` and neither side
+    /// is polled again.
+    BothFinished,
+}
+
+impl SelectState {
+    /// Returns `true` if the left (first) stream has terminated.
+    pub fn is_left_terminated(self) -> bool {
+        matches!(self, Self::LeftFinished | Self::BothFinished)
+    }
+
+    /// Returns `true` if the right (second) stream has terminated.
+    pub fn is_right_terminated(self) -> bool {
+        matches!(self, Self::RightFinished | Self::BothFinished)
+    }
+
+    /// Returns `true` if both streams have terminated.
+    pub fn is_terminated(self) -> bool {
+        matches!(self, Self::BothFinished)
+    }
+}
+
 enum InternalState {
     Start,
     LeftFinished,
     RightFinished,
     BothFinished,
+}
+
+impl From<&InternalState> for SelectState {
+    fn from(state: &InternalState) -> Self {
+        match state {
+            InternalState::Start => Self::Running,
+            InternalState::LeftFinished => Self::LeftFinished,
+            InternalState::RightFinished => Self::RightFinished,
+            InternalState::BothFinished => Self::BothFinished,
+        }
+    }
 }
 
 impl InternalState {
@@ -188,6 +240,27 @@ impl<St1, St2, Clos, State> SelectWithStrategy<St1, St2, Clos, State> {
     /// care should be taken to avoid losing resources when this is called.
     pub fn into_inner(self) -> (St1, St2) {
         (self.stream1, self.stream2)
+    }
+
+    /// Returns a snapshot of which sides of this combinator have terminated.
+    ///
+    /// A terminated side is never polled again; the other side keeps being
+    /// polled (and may keep yielding items) until it terminates as well.
+    /// Once both sides have terminated, polling stably returns `None`.
+    pub fn state(&self) -> SelectState {
+        SelectState::from(&self.internal_state)
+    }
+
+    /// Returns `true` if the left (first) stream has terminated and will not
+    /// be polled again.
+    pub fn is_left_terminated(&self) -> bool {
+        self.state().is_left_terminated()
+    }
+
+    /// Returns `true` if the right (second) stream has terminated and will
+    /// not be polled again.
+    pub fn is_right_terminated(&self) -> bool {
+        self.state().is_right_terminated()
     }
 }
 
