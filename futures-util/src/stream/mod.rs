@@ -93,7 +93,9 @@ mod select;
 pub use self::select::{Select, select};
 
 mod select_with_strategy;
-pub use self::select_with_strategy::{PollNext, SelectWithStrategy, select_with_strategy};
+pub use self::select_with_strategy::{
+    PollNext, SelectTermination, SelectWithStrategy, select_with_strategy,
+};
 
 mod unfold;
 pub use self::unfold::{Unfold, unfold};

@@ -8,6 +8,10 @@ Releases may yanked if there is a security bug, a soundness bug, or a regression
 Note: In this file, do not use the hard wrap in the middle of a sentence for compatibility with GitHub comment style markdown rendering.
 -->
 
+# Unreleased
+
+* Add `stream::SelectTermination` and `Select::termination()` / `SelectWithStrategy::termination()` to query which side of a two-way select stream has terminated. Terminated sides are never polled again, the remaining side keeps producing with the unchanged selection strategy, and once both sides have finished polling stably returns `None`.
+
 # 0.3.34 - 2026-08-11
 
 * Preserve cloned waker identity. (#3032)

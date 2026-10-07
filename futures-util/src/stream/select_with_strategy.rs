@@ -35,6 +35,49 @@ impl PollNext {
     }
 }
 
+/// Describes which side(s) of a two-way select stream have terminated.
+///
+/// Returned by [`SelectWithStrategy::termination()`] and
+/// [`Select::termination()`](crate::stream::Select::termination).
+///
+/// A terminated side is never polled again; the remaining side keeps
+/// being polled according to the (unchanged) selection strategy until it,
+/// too, terminates. Once both sides have terminated, polling the select
+/// stream stably returns `None`.
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone, Hash)]
+pub enum SelectTermination {
+    /// Neither stream has terminated yet.
+    #[default]
+    Neither,
+    /// The first (left) stream has terminated and is no longer polled.
+    Left,
+    /// The second (right) stream has terminated and is no longer polled.
+    Right,
+    /// Both streams have terminated; the select stream yields `None`.
+    Both,
+}
+
+impl SelectTermination {
+    /// Returns `true` if the first (left) stream has terminated.
+    #[must_use]
+    pub fn left_terminated(&self) -> bool {
+        matches!(self, Self::Left | Self::Both)
+    }
+
+    /// Returns `true` if the second (right) stream has terminated.
+    #[must_use]
+    pub fn right_terminated(&self) -> bool {
+        matches!(self, Self::Right | Self::Both)
+    }
+
+    /// Returns `true` if both streams have terminated.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum InternalState {
     Start,
     LeftFinished,
@@ -188,6 +231,24 @@ impl<St1, St2, Clos, State> SelectWithStrategy<St1, St2, Clos, State> {
     /// care should be taken to avoid losing resources when this is called.
     pub fn into_inner(self) -> (St1, St2) {
         (self.stream1, self.stream2)
+    }
+
+    /// Returns which side(s) of this select stream have terminated.
+    ///
+    /// Once a side has terminated it is never polled again; the other side
+    /// keeps being polled according to the (unchanged) selection strategy.
+    /// When both sides have terminated, polling this stream stably returns
+    /// `None`.
+    ///
+    /// This is a pure query: it does not poll either underlying stream and
+    /// does not change the selection behavior.
+    pub fn termination(&self) -> SelectTermination {
+        match self.internal_state {
+            InternalState::Start => SelectTermination::Neither,
+            InternalState::LeftFinished => SelectTermination::Left,
+            InternalState::RightFinished => SelectTermination::Right,
+            InternalState::BothFinished => SelectTermination::Both,
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use futures_core::{
 use pin_project_lite::pin_project;
 
 use super::assert_stream;
-use crate::stream::{PollNext, SelectWithStrategy, select_with_strategy};
+use crate::stream::{PollNext, SelectTermination, SelectWithStrategy, select_with_strategy};
 
 pin_project! {
     /// Stream for the [`select()`] function.
@@ -94,6 +94,18 @@ impl<St1, St2> Select<St1, St2> {
     /// care should be taken to avoid losing resources when this is called.
     pub fn into_inner(self) -> (St1, St2) {
         self.inner.into_inner()
+    }
+
+    /// Returns which side(s) of this select stream have terminated.
+    ///
+    /// Once a side has terminated it is never polled again; the other side
+    /// keeps being polled in the usual round-robin fashion. When both sides
+    /// have terminated, polling this stream stably returns `None`.
+    ///
+    /// This is a pure query: it does not poll either underlying stream and
+    /// does not change the selection behavior.
+    pub fn termination(&self) -> SelectTermination {
+        self.inner.termination()
     }
 }
 
