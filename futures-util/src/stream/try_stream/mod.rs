@@ -65,6 +65,9 @@ delegate_all!(
     ): Debug + Sink + Stream + FusedStream + AccessInner[St, (. .)] + New[|x: St, f: F| Map::new(IntoStream::new(x), map_err_fn(f))]
 );
 
+mod map_err_with_count;
+pub use self::map_err_with_count::MapErrWithCount;
+
 mod or_else;
 pub use self::or_else::OrElse;
 
@@ -230,6 +233,43 @@ pub trait TryStreamExt: TryStream {
         F: FnMut(Self::Error) -> E,
     {
         assert_stream::<Result<Self::Ok, E>, _>(MapErr::new(self, f))
+    }
+
+    /// Wraps the current stream in a new stream which maps the error value
+    /// using the provided closure, additionally passing the number of
+    /// successful (`Ok`) items yielded so far.
+    ///
+    /// The closure is called exactly once for each error produced by the
+    /// underlying stream. Since it must return an error value, it can
+    /// neither swallow the error nor inject additional `Ok` values.
+    ///
+    /// After an error has been mapped, the returned stream keeps following
+    /// the underlying stream: if the underlying stream is not terminated,
+    /// further items (and further errors, each mapped once with the updated
+    /// count) are yielded; once the underlying stream terminates, the
+    /// returned stream terminates as well.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use futures::stream::{self, TryStreamExt};
+    ///
+    /// let mut stream =
+    ///     stream::iter(vec![Ok(5), Ok(6), Err(0)])
+    ///         .map_err_with_count(|ok_count, x| x + ok_count as i32);
+    ///
+    /// assert_eq!(stream.try_next().await, Ok(Some(5)));
+    /// assert_eq!(stream.try_next().await, Ok(Some(6)));
+    /// assert_eq!(stream.try_next().await, Err(2));
+    /// # })
+    /// ```
+    fn map_err_with_count<E, F>(self, f: F) -> MapErrWithCount<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(usize, Self::Error) -> E,
+    {
+        assert_stream::<Result<Self::Ok, E>, _>(MapErrWithCount::new(self, f))
     }
 
     /// Chain on a computation for when a value is ready, passing the successful

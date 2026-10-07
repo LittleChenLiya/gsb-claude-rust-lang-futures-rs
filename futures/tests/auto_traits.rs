@@ -1368,6 +1368,15 @@ mod stream {
     assert_impl!(MapErr<(), PhantomPinned>: Unpin);
     assert_not_impl!(MapErr<PhantomPinned, ()>: Unpin);
 
+    assert_impl!(MapErrWithCount<(), ()>: Send);
+    assert_not_impl!(MapErrWithCount<*const (), ()>: Send);
+    assert_not_impl!(MapErrWithCount<(), *const ()>: Send);
+    assert_impl!(MapErrWithCount<(), ()>: Sync);
+    assert_not_impl!(MapErrWithCount<*const (), ()>: Sync);
+    assert_not_impl!(MapErrWithCount<(), *const ()>: Sync);
+    assert_impl!(MapErrWithCount<(), PhantomPinned>: Unpin);
+    assert_not_impl!(MapErrWithCount<PhantomPinned, ()>: Unpin);
+
     assert_impl!(MapOk<(), ()>: Send);
     assert_not_impl!(MapOk<*const (), ()>: Send);
     assert_not_impl!(MapOk<(), *const ()>: Send);

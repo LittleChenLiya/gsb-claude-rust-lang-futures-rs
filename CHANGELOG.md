@@ -8,6 +8,10 @@ Releases may yanked if there is a security bug, a soundness bug, or a regression
 Note: In this file, do not use the hard wrap in the middle of a sentence for compatibility with GitHub comment style markdown rendering.
 -->
 
+# Unreleased
+
+* Add `TryStreamExt::map_err_with_count` adapter, which maps each error exactly once with the number of successful items yielded so far.
+
 # 0.3.34 - 2026-08-11
 
 * Preserve cloned waker identity. (#3032)

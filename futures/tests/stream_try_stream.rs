@@ -181,3 +181,95 @@ fn try_any() {
         assert_eq!(Err("err"), any);
     });
 }
+
+/// A small in-memory, hand-written stream fixture: yields the queued items
+/// one poll at a time and terminates once the queue is empty.
+struct ManualStream {
+    items: std::collections::VecDeque<Result<i32, &'static str>>,
+}
+
+impl ManualStream {
+    fn new(items: impl IntoIterator<Item = Result<i32, &'static str>>) -> Self {
+        Self { items: items.into_iter().collect() }
+    }
+}
+
+impl Stream for ManualStream {
+    type Item = Result<i32, &'static str>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.items.pop_front())
+    }
+}
+
+#[test]
+fn map_err_with_count_maps_error_once_with_ok_count() {
+    let cx = &mut noop_context();
+    // Two successful items, then an error, then the stream terminates.
+    let stream = ManualStream::new([Ok(1), Ok(2), Err("boom")]);
+
+    let mut calls = Vec::new();
+    let mut s = stream.map_err_with_count(|ok_count, e| {
+        calls.push((ok_count, e));
+        format!("{e} after {ok_count} ok(s)")
+    });
+
+    assert_eq!(Poll::Ready(Some(Ok(1))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Ok(2))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Err("boom after 2 ok(s)".to_string()))), s.poll_next_unpin(cx));
+    // The input stream is terminated, so the adapted stream is too.
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+    drop(s);
+    // The error was mapped exactly once, with the count of successful items,
+    // and polling after the error / termination triggered no extra calls.
+    assert_eq!(calls, vec![(2usize, "boom")]);
+}
+
+#[test]
+fn map_err_with_count_follows_input_stream_after_error() {
+    let cx = &mut noop_context();
+
+    // Case 1: the input stream continues after the error.
+    let continuing = ManualStream::new([Ok(1), Ok(2), Err("boom"), Ok(3), Err("bang"), Ok(4)]);
+    let mut calls = Vec::new();
+    let mut out = Vec::new();
+    {
+        let mut s = continuing.map_err_with_count(|ok_count, e| {
+            calls.push((ok_count, e));
+            (e, ok_count)
+        });
+        while let Poll::Ready(Some(item)) = s.poll_next_unpin(cx) {
+            out.push(item);
+        }
+    }
+    assert_eq!(out, vec![Ok(1), Ok(2), Err(("boom", 2)), Ok(3), Err(("bang", 3)), Ok(4)]);
+    // Each error was mapped exactly once, with the running count of
+    // successful items; the errors did not terminate the stream.
+    assert_eq!(calls, vec![(2usize, "boom"), (3usize, "bang")]);
+
+    // Case 2: the input stream terminates right after the error.
+    let terminating = ManualStream::new([Ok(1), Ok(2), Err("boom")]);
+    let mut s = terminating.map_err_with_count(|ok_count, e| (e, ok_count));
+    assert_eq!(Poll::Ready(Some(Ok(1))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Ok(2))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(Some(Err(("boom", 2)))), s.poll_next_unpin(cx));
+    assert_eq!(Poll::Ready(None), s.poll_next_unpin(cx));
+}
+
+#[test]
+fn map_err_regression_matches_map_err_with_count() {
+    // Short regression example for the original `map_err` interface: over the
+    // same input, `map_err` (ignoring the count) and `map_err_with_count`
+    // must produce identical item sequences.
+    let items = || vec![Ok(1), Ok(2), Err("boom"), Ok(3)];
+
+    let via_map_err: Vec<Result<i32, String>> =
+        block_on(stream::iter(items()).map_err(|e| format!("mapped: {e}")).collect());
+    let via_map_err_with_count: Vec<Result<i32, String>> = block_on(
+        stream::iter(items()).map_err_with_count(|_ok_count, e| format!("mapped: {e}")).collect(),
+    );
+
+    assert_eq!(via_map_err, vec![Ok(1), Ok(2), Err("mapped: boom".to_string()), Ok(3)]);
+    assert_eq!(via_map_err, via_map_err_with_count);
+}
